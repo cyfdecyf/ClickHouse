@@ -371,9 +371,19 @@ bool parseNaN(ReadBuffer & buf);
 void assertInfinity(ReadBuffer & buf);
 void assertNaN(ReadBuffer & buf);
 
+static inline double parseFloatStod(const std::string& s) {
+    try {
+        return std::stod(s);
+    } catch (...) {
+        fprintf(stderr, "exception parse float: %s\n", s.c_str());
+        throw;
+    }
+    return 0;
+}
 
 /// Rough: not exactly nearest machine representable number is returned.
 /// Some garbage may be successfully parsed, examples: '.' parsed as 0; 123Inf parsed as inf.
+/// HACK: use std::stod to parse float to make it precise.
 template <typename T, typename ReturnType, char point_symbol = '.'>
 ReturnType readFloatTextImpl(T & x, ReadBuffer & buf)
 {
@@ -381,8 +391,6 @@ ReturnType readFloatTextImpl(T & x, ReadBuffer & buf)
 
     bool negative = false;
     x = 0;
-    bool after_point = false;
-    double power_of_ten = 1;
 
     if (buf.eof())
     {
@@ -392,6 +400,10 @@ ReturnType readFloatTextImpl(T & x, ReadBuffer & buf)
             return ReturnType(false);
     }
 
+    // std::to_string(std::numeric_limits<double>::max()) returns a 316 byte
+    // string.
+    char rawbuf[316];
+    int len = 0;
     while (!buf.eof())
     {
         switch (*buf.position())
@@ -402,7 +414,6 @@ ReturnType readFloatTextImpl(T & x, ReadBuffer & buf)
                 negative = true;
                 break;
             case point_symbol:
-                after_point = true;
                 break;
             case '0':
             case '1':
@@ -414,16 +425,6 @@ ReturnType readFloatTextImpl(T & x, ReadBuffer & buf)
             case '7':
             case '8':
             case '9':
-                if (after_point)
-                {
-                    power_of_ten /= 10;
-                    x += (*buf.position() - '0') * power_of_ten;
-                }
-                else
-                {
-                    x *= 10;
-                    x += *buf.position() - '0';
-                }
                 break;
             case 'e':
             case 'E':
@@ -433,7 +434,8 @@ ReturnType readFloatTextImpl(T & x, ReadBuffer & buf)
                 bool res = exceptionPolicySelector<throw_exception>(readIntText<Int32>, tryReadIntText<Int32>, exponent, buf);
                 if (res)
                 {
-                    x *= exp10(exponent);
+                    double d = parseFloatStod(std::string(rawbuf, len));
+                    x = static_cast<T>(d * exp10(exponent));
                     if (negative)
                         x = -x;
                 }
@@ -468,14 +470,21 @@ ReturnType readFloatTextImpl(T & x, ReadBuffer & buf)
 
             default:
             {
+                x = static_cast<T>(parseFloatStod(std::string(rawbuf, len)));
                 if (negative)
                     x = -x;
                 return ReturnType(true);
             }
         }
+        if (len >= sizeof(rawbuf)) {
+            throw Exception("float number length exceeds " + std::to_string(sizeof(rawbuf)),
+                ErrorCodes::CANNOT_PARSE_NUMBER);
+        }
+        rawbuf[len++] = *buf.position();
         ++buf.position();
     }
 
+    x = static_cast<T>(parseFloatStod(std::string(rawbuf, len)));
     if (negative)
         x = -x;
 
